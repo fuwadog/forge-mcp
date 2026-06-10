@@ -14,7 +14,7 @@
  * FORGE_EMBEDDED=1 forces embedded mode.
  */
 import { spawn, type Subprocess } from "bun";
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync, openSync, writeSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -72,22 +72,21 @@ async function probeHealth(
 
 // ── Boot lock arbitration ──────────────────────────────────────────────────
 async function acquireBootLock(): Promise<boolean> {
-  // O_EXCL-like: try to create exclusively
+  // Atomic O_EXCL creation: either we create it or another process did.
+  // "wx" = O_CREAT | O_EXCL — fails if file already exists.
   try {
-    const file = Bun.file(BOOT_LOCK, { type: "application/json" });
-    if (await file.exists()) {
-      // Another process holds the lock — poll for daemon.json
+    const fd = openSync(BOOT_LOCK, "wx");
+    // We won the lock — write our PID
+    const data = Buffer.from(JSON.stringify({ pid: process.pid }));
+    writeSync(fd, data, 0, data.length);
+    closeSync(fd);
+    return true;
+  } catch (err: unknown) {
+    // EEXIST means another proxy holds the lock — that's fine
+    if ((err as { code?: string }).code === "EEXIST") {
       return false;
     }
-  } catch {
-    // file doesn't exist — proceed
-  }
-
-  try {
-    // Write our PID into the lock file
-    await Bun.write(BOOT_LOCK, JSON.stringify({ pid: process.pid }));
-    return true;
-  } catch {
+    // Other error (permissions, etc.) — cannot acquire
     return false;
   }
 }

@@ -14,7 +14,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { unlinkSync, writeFileSync, renameSync, readFileSync, existsSync, statSync } from "node:fs";
+import { unlinkSync, writeFileSync, renameSync, readFileSync, existsSync, statSync, createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -29,6 +29,29 @@ try {
 } catch {
   // version stays "0.0.0-dev"
 }
+
+// ── File logger ─────────────────────────────────────────────────────────────
+let logStream: ReturnType<typeof createWriteStream> | null = null;
+
+function initLogger(): void {
+  try {
+    logStream = createWriteStream(daemonLogPath, { flags: "a" });
+  } catch {
+    // degraded: no file logging, console still works
+  }
+}
+
+function log(level: string, ...args: unknown[]): void {
+  const ts = new Date().toISOString();
+  const msg = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+  const line = `${ts} [${level}] ${msg}\n`;
+  process.stdout.write(line); // keep console behavior
+  logStream?.write(line);    // also append to file
+}
+
+// Replace console.log/error for daemon use
+console.log = (...args: unknown[]) => log("INFO", ...args);
+console.error = (...args: unknown[]) => log("ERROR", ...args);
 
 // ── Load forge.json config ──────────────────────────────────────────────────
 interface ForgeConfig {
@@ -55,6 +78,7 @@ const ORIGIN_ALLOWLIST = config.security?.originAllowlist ?? [
   "http://127.0.0.1",
   "http://localhost",
 ];
+const DRAIN_MS = config.daemon?.drainMs ?? 5_000;
 
 const sessions = new SessionManager({
   oncloseGraceMs: 10_000,
@@ -285,7 +309,7 @@ function nodeToWebRequest(req: IncomingMessage): Request {
     `http://${req.headers.host ?? "localhost"}`,
   );
   // Read the full body so the transport can parse it
-  return new Request(url, {
+  return new Request(url.href, {
     method: req.method,
     headers: Object.fromEntries(
       Object.entries(req.headers).filter(
@@ -399,26 +423,51 @@ function resetIdleTimer(): void {
 }
 
 // ── Graceful shutdown (single function, all exit paths — F4) ───────────────
+let shuttingDown = false;
 async function gracefulShutdown(): Promise<void> {
-  // 1. Drain sessions
-  await sessions.shutdown();
+  if (shuttingDown) return;
+  shuttingDown = true;
 
-  // 2. Remove daemon.json
+  console.log("[daemon] shutdown initiated");
+
+  // 1. Stop accepting new connections
+  server.close(() => {
+    console.log("[daemon] server stopped accepting connections");
+  });
+
+  // 2. Drain inflight sessions (with drainMs timeout)
+  console.log(`[daemon] draining sessions (drainMs=${DRAIN_MS})`);
+  const drainTimeout = new Promise<void>((resolve) => setTimeout(resolve, DRAIN_MS));
+  await Promise.race([sessions.shutdown(), drainTimeout]);
+
+  // 3. LSP shutdown hook (M3 adds this)
+  // await lspShutdown();
+
+  // 4. Watcher unsubscribeAll hook (M5 adds this)
+  // await watcherUnsubscribeAll();
+
+  // 5. PID sweep hook (M3 adds this)
+  // await pidSweep();
+
+  // 6. Remove daemon.json
   try {
     unlinkSync(daemonJsonPath);
   } catch {
     // may not exist
   }
 
-  // 3. Flush log
+  // 7. Flush/close log stream
   console.log("[daemon] shutting down");
+  logStream?.end();
+  logStream = null;
 
-  // 4. Exit
+  // 8. Exit
   process.exit(0);
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 rotateLogs();
+initLogger();
 
 const bootTime = Date.now();
 
