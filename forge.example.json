@@ -1,0 +1,15 @@
+{
+  "daemon":   { "port": 0, "idleShutdownMin": 30, "logMaxMb": 5, "drainMs": 5000 },
+  "cache":    { "maxBytes": 67108864, "maxEntryBytes": 2097152, "enabled": true, "cooldownMs": 2000 },
+  "lsp":      { "lruCap": 5, "idleReapMin": 5, "restartBudget": 3, "budgetWindowMin": 5,
+                "halfOpenProbeSec": 60, "tsMaxMemoryMb": 3072, "warmup": "lazy" },
+  "watch":    { "enabled": true, "debounceMs": 100, "coarseThreshold": 500,
+                "ignore": ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/.venv/**", "**/target/**"] },
+  "ast":      { "napi": true, "langPackages": [] },
+  "sessions": { "idleSweepMin": 30, "oncloseGraceMs": 10000 },
+  "children": { "concurrency": 8, "outputCapBytes": 10485760, "defaultTimeoutMs": 30000 },
+  "limits":   { "maxSliceTokens": 120000 },
+  "profiles": { "claude-ai": ["read", "edit", "ast_grep"], "default": "all" },
+  "security": { "bindHost": "127.0.0.1", "allowOutsideRoot": false,
+                "originAllowlist": ["http://127.0.0.1", "http://localhost"] }
+}

@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Live config (commit forge.example.json instead)
+forge.json
+
+# Runtime artifacts — these belong in %LOCALAPPDATA%\forge-mcp\ and must NEVER exist here,
+# but guard anyway: daemon.json contains the bearer token.
+daemon.json
+boot.lock
+logs/
+*.log
+
+# Tool state
+.nav-lastfail.json
+
+# OS noise
+Thumbs.db
+desktop.ini
