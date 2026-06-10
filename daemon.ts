@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * forge-mcp daemon — M1 skeleton.
+ * forge-mcp daemon — M1 skeleton + M2 tool registration.
  *
  * Runs as a detached background process. Single entry point that owns:
  *   - 127.0.0.1 HTTP server (random free port)
@@ -10,7 +10,7 @@
  *   - Idle shutdown (zero sessions → graceful exit)
  *   - Boot-time log rotation
  *
- * M1 has NO tools registered. M2 adds core/port and registerTool calls.
+ * M1: daemon skeleton + HTTP routing. M2: core tools (read + edit) registered via dispatch.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -19,7 +19,13 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { ensureStateDirs, daemonJsonPath, daemonLogPath } from "./core/statePaths.js";
-import { SessionManager } from "./core/sessions.js";
+import { SessionManager, type SessionEntry } from "./core/sessions.js";
+import { dispatch, type NavRequest, type NavEnvelope } from "./core/index.js";
+import { z } from "zod";
+import { astGrepTool } from "./tools/ast-grep.js";
+import { gitViewTool } from "./tools/git-view.js";
+import { testRunTool } from "./tools/test-run.js";
+import { depAuditTool } from "./tools/dep-audit.js";
 
 // ── Version ────────────────────────────────────────────────────────────────
 let forgeVersion = "0.0.0-dev";
@@ -268,18 +274,136 @@ async function handleMcp(
       version: forgeVersion,
     });
 
+    // Capture session entry once onsessioninitialized fires (for root resolution in tool callbacks)
+    let sessionEntry: SessionEntry | undefined;
+
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       enableDnsRebindingProtection: true,
       allowedOrigins: ORIGIN_ALLOWLIST,
       onsessioninitialized: (sessionId: string) => {
-        sessions.register(sessionId, mcpServer, transport);
+        sessionEntry = sessions.register(sessionId, mcpServer, transport);
         resetIdleTimer();
       },
     });
 
-    // M1: no tools registered (M2 adds core/port + registerTool calls)
-    // The server starts with an empty tool set.
+    // ── M2: register core tools (read + edit) backed by dispatch ──────────
+    mcpServer.tool(
+      "read",
+      "Token-lean file navigation. Modes: tree, outline, symbols, read, peek, search, glob, def, refs, hover, diagnostics, wsymbol",
+      {
+        mode: z.enum(["tree", "outline", "symbols", "read", "peek", "search", "glob", "def", "refs", "hover", "diagnostics", "wsymbol"]),
+        path: z.string().optional(),
+        pattern: z.string().optional(),
+        query: z.string().optional(),
+        anchor: z.string().optional(),
+        offset: z.number().optional(),
+        limit: z.number().optional(),
+        depth: z.number().optional(),
+        max: z.number().optional(),
+        line: z.number().optional(),
+        character: z.number().optional(),
+        include_declaration: z.boolean().optional(),
+      },
+      async (args) => {
+        const root = sessionEntry?.rootsCache[0] || process.cwd();
+        const result = await dispatch({ ...args, root } as NavRequest);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      },
+    );
+
+    mcpServer.tool(
+      "edit",
+      "Surgical file mutation. Modes: edit, write, rename, action. Stale-guard via expect fingerprint.",
+      {
+        mode: z.enum(["edit", "write", "rename", "action"]),
+        path: z.string().optional(),
+        find: z.string().optional(),
+        replace: z.string().optional(),
+        all: z.boolean().optional(),
+        anchor: z.string().optional(),
+        content: z.string().optional(),
+        expect: z.string().optional(),
+        newName: z.string().optional(),
+        oldName: z.string().optional(),
+        scope: z.enum(["file", "lsp"]).optional(),
+        apply: z.number().optional(),
+        kind: z.string().optional(),
+        line: z.number().optional(),
+        character: z.number().optional(),
+        postDiagnostics: z.boolean().optional(),
+      },
+      async (args) => {
+        const root = sessionEntry?.rootsCache[0] || process.cwd();
+        const result = await dispatch({ ...args, root } as NavRequest);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      },
+    );
+
+    // ── M6: register additional tools (ast_grep, git_view, test_run, dep_audit) ──
+    mcpServer.tool(
+      "ast_grep",
+      "Structural AST search/rewrite by code shape. apply=true gates mutation.",
+      {
+        mode: z.enum(["search", "rewrite"]),
+        pattern: z.string(),
+        lang: z.string().optional(),
+        path: z.string().optional(),
+        rewrite: z.string().optional(),
+        apply: z.boolean().optional(),
+        max: z.number().optional(),
+        timeout: z.number().optional(),
+      },
+      async (args: any) => {
+        const result = await astGrepTool({ ...args, root: sessionEntry?.rootsCache?.[0] || process.cwd() });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      }
+    );
+
+    mcpServer.tool(
+      "git_view",
+      "Read-only git inspection. Mutating subcommands refused with hints.",
+      {
+        subcommand: z.string(),
+        args: z.array(z.string()).optional(),
+        workdir: z.string().optional(),
+        timeout: z.number().optional(),
+      },
+      async (args: any) => {
+        const result = await gitViewTool({ ...args, root: sessionEntry?.rootsCache?.[0] || process.cwd() });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      }
+    );
+
+    mcpServer.tool(
+      "test_run",
+      "Adaptive test/lint/type runner. check, fix, or last-failed modes.",
+      {
+        mode: z.enum(["check", "fix", "last-failed"]),
+        timeout: z.number().optional(),
+        workdir: z.string().optional(),
+      },
+      async (args: any) => {
+        const result = await testRunTool({ ...args, root: sessionEntry?.rootsCache?.[0] || process.cwd() });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      }
+    );
+
+    mcpServer.tool(
+      "dep_audit",
+      "Dependency vulnerability audit. Detects project stack and runs appropriate audit.",
+      {
+        path: z.string().optional(),
+        offline: z.boolean().optional(),
+        severity: z.enum(["critical", "high", "all"]).optional(),
+        workdir: z.string().optional(),
+      },
+      async (args: any) => {
+        const result = await depAuditTool({ ...args, root: sessionEntry?.rootsCache?.[0] || process.cwd() });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      }
+    );
+
     await mcpServer.connect(transport);
 
     const webReq = nodeToWebRequest(req);
